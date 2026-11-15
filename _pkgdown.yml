@@ -1,0 +1,14 @@
+destination: ../docs/cudaFin
+
+template:
+  bootstrap: 5
+
+reference:
+- title: Rolling-window forecasting
+  contents:
+  - rolling_predict
+
+articles:
+- title: Get started
+  contents:
+  - getting-started

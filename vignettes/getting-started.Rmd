@@ -1,0 +1,53 @@
+---
+title: "Getting started with cudaFin"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Getting started with cudaFin}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(cudaFin)
+```
+
+`cudaFin` is a downstream example of the `rcupp` framework for finance-style
+workloads. It refits a lasso on successive rolling windows of a feature
+matrix and returns one-step-ahead forecasts. Like `cudaBio`, it has no CUDA
+code of its own and works with either `rcupp` backend.
+
+## A rolling forecast
+
+```{r rolling}
+set.seed(1)
+n <- 80L
+p <- 5L
+X <- matrix(rnorm(n * p), n, p)
+y <- drop(X %*% c(2, -1, 0, 0, 0)) + rnorm(n, sd = 0.3)
+
+f <- rolling_predict(X, y, window = 30L, lambda = 0.01)
+head(f$pred, 5)
+```
+
+The returned list holds the forecasts (`pred`), the realized values
+(`actual`), the coefficient path (`coefficients`), plus summary statistics:
+
+```{r summary}
+f$mse
+f$dir_acc
+dim(f$coefficients)
+f$backend
+```
+
+`mse` is the mean squared forecast error and `dir_acc` is the fraction of
+steps where the predicted direction matched the realized one. The
+`coefficients` matrix has one column per forecast step, so it shows how the
+fitted signal evolves over the rolling windows.
+
+## Choosing the window
+
+`window` sets the number of past observations used for each fit; `lambda`
+controls the penalty and `n_iter` the number of solver steps per window.
+Smaller windows adapt faster but are noisier. See `?rolling_predict` for the
+full argument list.

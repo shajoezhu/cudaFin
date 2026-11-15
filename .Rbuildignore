@@ -1,0 +1,10 @@
+^.*\.Rproj$
+^\.Rproj\.user$
+^\.lintr$
+^_pkgdown\.yml$
+^\.github$
+^docs$
+^\.git$
+^\.gitignore$
+^src/.*\.o$
+^src/.*\.so$

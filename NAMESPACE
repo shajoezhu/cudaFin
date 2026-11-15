@@ -1,0 +1,4 @@
+useDynLib(cudaFin, .registration = TRUE)
+export(rolling_predict)
+importFrom(rcupp, cuda_available)
+importFrom(Rcpp, evalCpp)

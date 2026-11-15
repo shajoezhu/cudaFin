@@ -19,7 +19,8 @@ Language: en-US
 Imports: rcupp, Rcpp
 LinkingTo: rcupp, Rcpp
 NeedsCompilation: yes
-Suggests: testthat (>= 3.0.0), knitr, rmarkdown, pkgdown
+Suggests: testthat (>= 3.0.0), knitr, rmarkdown
 Remotes: shajoezhu/rcupp
 VignetteBuilder: knitr
 Config/testthat/edition: 3
+Config/Needs/website: pkgdown

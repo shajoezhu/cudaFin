@@ -1,9 +1,15 @@
+ABI
 CUDA
 GetCCallable
 ISTA
 LinkingTo
 Lipschitz
 Rcpp
+cudaBio
+cudaGlmnet
+github
+glmnet
+prox
 rcupp
 rcupp's
 realised

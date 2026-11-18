@@ -45,9 +45,134 @@ steps where the predicted direction matched the realized one. The
 `coefficients` matrix has one column per forecast step, so it shows how the
 fitted signal evolves over the rolling windows.
 
-## Choosing the window
+## Choosing the window and the penalty
 
-`window` sets the number of past observations used for each fit; `lambda`
-controls the penalty and `n_iter` the number of solver steps per window.
-Smaller windows adapt faster but are noisier. See `?rolling_predict` for the
-full argument list.
+`window` sets the number of past observations used for each fit, `lambda`
+controls the penalty, and `n_iter` the number of solver steps per window.
+Smaller windows adapt faster but are noisier, while a larger `lambda` drives
+more coefficients to zero. Because each fit is cheap, both can be tuned by a
+direct sweep. We use a larger simulated sample with a known sparse signal:
+
+```{r tuning-data}
+set.seed(11)
+n <- 120L
+p <- 6L
+X <- matrix(rnorm(n * p), n, p)
+beta_true <- c(1.2, -0.8, 0, 0, 0.5, 0)
+y <- drop(X %*% beta_true) + rnorm(n, sd = 0.5)
+```
+
+```{r window-sweep, fig.width = 6, fig.height = 4}
+windows <- c(20L, 30L, 40L, 60L, 80L)
+mse_w <- vapply(windows, function(w) {
+  rolling_predict(X, y, window = w, lambda = 0.02, n_iter = 100L)$mse
+}, numeric(1))
+round(mse_w, 3)
+
+plot(windows, mse_w, type = "b", pch = 19, col = "steelblue",
+     xlab = "Window length", ylab = "Forecast MSE",
+     main = "Effect of window length")
+```
+
+Longer training windows give lower error because the lasso estimate is less
+noisy; the gain tapers off once the window is long enough. The penalty sweep
+shows the usual bias-variance trade-off:
+
+```{r lambda-sweep, fig.width = 7, fig.height = 4}
+lambdas <- c(0, 0.01, 0.05, 0.1, 0.3, 0.6)
+mse_l <- vapply(lambdas, function(l) {
+  rolling_predict(X, y, window = 40L, lambda = l, n_iter = 100L)$mse
+}, numeric(1))
+nonzero <- vapply(lambdas, function(l) {
+  fit_l <- rolling_predict(X, y, window = 40L, lambda = l,
+                           n_iter = 100L)
+  mean(colSums(fit_l$coefficients != 0))
+}, numeric(1))
+sweep <- rbind(mse = mse_l, nonzero = nonzero)
+colnames(sweep) <- lambdas
+round(sweep, 3)
+
+op <- par(mfrow = c(1, 2), mar = c(5, 4, 3, 1) + 0.1)
+plot(lambdas, mse_l, type = "b", pch = 19, col = "steelblue",
+     xlab = "lambda", ylab = "Forecast MSE", main = "Accuracy")
+plot(lambdas, nonzero, type = "b", pch = 19, col = "darkorange",
+     xlab = "lambda", ylab = "Mean non-zero coefficients",
+     main = "Sparsity")
+par(op)
+```
+
+Moderate values of `lambda` prune irrelevant features at little cost in
+accuracy, while a very large penalty removes real signal and inflates the
+error. See `?rolling_predict` for the full argument list.
+
+## Visualizing the forecasts
+
+A single fit is easiest to read as a time series:
+
+```{r main-fit}
+f <- rolling_predict(X, y, window = 40L, lambda = 0.02, n_iter = 100L)
+c(mse = f$mse, dir_acc = f$dir_acc)
+```
+
+```{r forecast-plot, fig.width = 6, fig.height = 4}
+plot(f$actual, type = "l", col = "grey40", lwd = 2,
+     xlab = "Forecast step", ylab = "Value",
+     main = "Predicted vs actual")
+lines(f$pred, col = "darkorange", lwd = 2)
+legend("topright", legend = c("actual", "predicted"),
+       col = c("grey40", "darkorange"), lwd = 2, bty = "n")
+```
+
+The `coefficients` matrix has one column per forecast step, so plotting it as
+an image shows how each feature's weight evolves as the window rolls forward.
+The three signal features keep large, stable weights; the others stay near
+zero.
+
+```{r coef-path, fig.width = 6, fig.height = 4}
+nr <- nrow(f$coefficients)
+nc <- ncol(f$coefficients)
+image(seq_len(nc), seq_len(nr), t(f$coefficients), axes = FALSE,
+      xlab = "Forecast step", ylab = "Feature",
+      col = hcl.colors(32, "Blue-Red 3"), main = "Coefficient path")
+axis(1)
+axis(2, at = seq_len(nr), labels = seq_len(nr), las = 1)
+box()
+```
+
+## Reproducibility and the pure-R reference
+
+`rolling_predict()` is fully deterministic: the step size uses the fixed
+Lipschitz bound `1 / sum(Xw^2)` and `n_iter` is fixed, so the same inputs give
+bit-identical results on every backend.
+
+```{r reproducible}
+f2 <- rolling_predict(X, y, window = 40L, lambda = 0.02, n_iter = 100L)
+identical(f$pred, f2$pred)
+identical(f$coefficients, f2$coefficients)
+```
+
+That determinism makes the compiled path easy to audit against a short pure-R
+implementation of the same ISTA contract. Repeating the first window's fit by
+hand reproduces its coefficients to machine precision:
+
+```{r pure-r-ref}
+ista_ref <- function(Xw, yw, lambda, n_iter) {
+  step <- 1 / sum(Xw^2)
+  thresh <- lambda * nrow(Xw) * step
+  beta <- rep(0, ncol(Xw))
+  for (it in seq_len(n_iter)) {
+    r <- (yw - as.vector(Xw %*% beta)) * step
+    u <- beta + as.vector(crossprod(Xw, r))
+    beta <- sign(u) * pmax(abs(u) - thresh, 0)
+  }
+  beta
+}
+w <- 40L
+Xw <- X[seq_len(w), , drop = FALSE]
+beta_ref <- ista_ref(Xw, y[seq_len(w)], 0.02, 100L)
+max(abs(f$coefficients[, 1] - beta_ref))
+```
+
+The package test suite extends this comparison to the whole forecast path.
+That is why the results plotted above can be trusted on both the CUDA backend
+and the CPU fallback.

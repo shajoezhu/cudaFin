@@ -1,4 +1,4 @@
-destination: ../docs/cudaFin
+destination: docs
 
 template:
   bootstrap: 5
@@ -12,3 +12,6 @@ articles:
 - title: Get started
   contents:
   - getting-started
+- title: Applications
+  contents:
+  - stock-lasso-example

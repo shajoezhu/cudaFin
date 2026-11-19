@@ -5,6 +5,7 @@ ISTA
 LinkingTo
 Lipschitz
 Rcpp
+collinear
 cudaBio
 cudaGlmnet
 github

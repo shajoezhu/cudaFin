@@ -16,7 +16,7 @@ Description: A minimal downstream example of the 'rcupp' CUDA-for-Rcpp
 License: Apache License 2.0
 Encoding: UTF-8
 Language: en-US
-Imports: rcupp, Rcpp
+Imports: rcupp (>= 0.1.0), Rcpp
 LinkingTo: rcupp, Rcpp
 NeedsCompilation: yes
 Suggests: testthat (>= 3.0.0), knitr, rmarkdown

@@ -1,3 +1,7 @@
+# cudaFin 0.0.0.9007
+
+* Development version bumped from 0.0.0.9006.
+
 # cudaFin 0.0.0.9006
 
 * Development version bumped from 0.0.0.9005.

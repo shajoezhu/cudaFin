@@ -1,0 +1,296 @@
+---
+title: "Analyzing a single stock with the lasso"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Analyzing a single stock with the lasso}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(cudaFin)
+```
+
+Can the lasso help analyze a single stock? This article walks through one
+concrete, reproducible example. The goal is **sparse signal attribution** —
+finding the few signals, out of many candidates, that explain a stock's
+next-day return — not reliable price prediction. Daily equity returns have a
+very low signal-to-noise ratio, so any edge is small; the honest result below
+is a modest one, and half the lesson is validating it correctly.
+
+Two rules matter more than the solver:
+
+- **Respect the time order.** Fit only on past data. Random K-fold
+  cross-validation leaks the future into the training fold and is
+  inappropriate for time series.
+- **Freeze preprocessing on the training window.** Standardize features
+  using training statistics only, then apply that fixed transform forward.
+
+`cudaFin::rolling_predict()` implements exactly this pattern: it refits a
+lasso on each rolling window and forms one-step-ahead forecasts. Everything
+below uses only `cudaFin` and base R — no `glmnet`, no `cudaGlmnet`, no extra
+dependencies — which keeps the example (and the package) lightweight.
+
+## A simulated single stock
+
+We simulate about 1.5 years of daily data: 30 candidate signals on a common
+scale (already standardized by construction, so no fitted preprocessing is
+needed here). Only the first three drive the return, with coefficients 0.9,
+-0.6 and 0.4; the other 27 are noise. The noise is scaled so the in-sample
+R-squared is about 0.10 — deliberately low, like real equity returns.
+Features observed at the close of day `t` predict the return of day `t + 1`,
+so the design matrix is lagged by one row.
+
+```{r data}
+set.seed(42)
+n_days <- 420L
+p <- 30L
+X <- matrix(rnorm(n_days * p), n_days, p)
+beta_true <- c(0.9, -0.6, 0.4, rep(0, p - 3L))
+signal <- drop(X %*% beta_true)
+noise <- rnorm(n_days, sd = sqrt(var(signal) * (1 / 0.10 - 1)))
+ret <- c(NA, signal[seq_len(n_days - 1L)] + noise[2:n_days])
+X <- X[seq_len(n_days - 1L), , drop = FALSE]
+y <- ret[2:n_days]
+c(n = nrow(X), p = ncol(X), true_drivers = sum(beta_true != 0))
+```
+
+## The estimator and a transparent reference
+
+`rolling_predict()` minimizes squared error plus an L1 penalty by proximal
+gradient (ISTA), with a fixed step size and a fixed number of iterations on
+each window. That is a *truncated* solve: coefficients are a lightly
+regularized approximation, not the fully converged optimum. This is fine here
+because we care about walk-forward errors and the sparsity pattern, not exact
+coefficient values.
+
+For the sweeps below we use `roll_lasso()`, a short pure-R implementation of
+the same deterministic contract (fixed step `1 / sum(Xw^2)`, soft threshold
+`lambda * window * step`). It is exactly what the package tests mirror
+`rolling_predict()` against, and the getting-started vignette uses the same
+reference. Keeping the computation in plain R makes the article fast and
+reproducible on any backend; the last section verifies that
+`rolling_predict()` returns identical numbers to machine precision.
+
+```{r reference}
+roll_lasso <- function(X, y, window, lambda, n_iter) {
+  n <- nrow(X)
+  p <- ncol(X)
+  np <- n - window
+  pred <- numeric(np)
+  actual <- numeric(np)
+  coef <- matrix(0, p, np)
+  for (tt in (window + 1L):n) {
+    slot <- tt - window
+    rows <- (tt - window):(tt - 1L)
+    Xw <- X[rows, , drop = FALSE]
+    yw <- y[rows]
+    step <- 1 / sum(Xw^2)
+    thresh <- lambda * window * step
+    beta <- rep(0, p)
+    for (it in seq_len(n_iter)) {
+      r <- (yw - as.vector(Xw %*% beta)) * step
+      u <- beta + as.vector(crossprod(Xw, r))
+      beta <- sign(u) * pmax(abs(u) - thresh, 0)
+    }
+    pred[slot] <- sum(X[tt, ] * beta)
+    actual[slot] <- y[tt]
+    coef[, slot] <- beta
+  }
+  list(pred = pred, actual = actual, coef = coef,
+       mse = mean((pred - actual)^2),
+       dir_acc = mean(sign(pred) == sign(actual)))
+}
+```
+
+## Choosing the penalty on the training period only
+
+We split at row 280: rows 1-280 are the training/validation period used to
+choose `lambda`; rows 281 onward are locked away as an out-of-sample test.
+Each `roll_lasso()` fit is itself walk-forward — the forecast for row
+`window + i` is fit only on the trailing `window` rows — so no future row ever
+enters a fit. We pick `lambda` by minimizing walk-forward MSE on the training
+period alone.
+
+```{r selection-setup}
+train_end <- 280L
+window <- 120L
+n_iter <- 100L
+grid <- c(0, 0.1, 0.2, 0.3, 0.5, 0.8, 1.2)
+Xtr <- X[seq_len(train_end), , drop = FALSE]
+ytr <- y[seq_len(train_end)]
+```
+
+```{r train-sweep}
+tr_mse <- vapply(grid, function(l) {
+  roll_lasso(Xtr, ytr, window, l, n_iter)$mse
+}, numeric(1))
+tr_nz <- vapply(grid, function(l) {
+  f <- roll_lasso(Xtr, ytr, window, l, n_iter)
+  mean(colSums(f$coef != 0))
+}, numeric(1))
+sweep <- rbind(train_mse = round(tr_mse, 3),
+               mean_nonzero = round(tr_nz, 2))
+colnames(sweep) <- grid
+sweep
+```
+
+As `lambda` grows, fewer features survive and the error first falls (noise is
+pruned) then rises (real signal is pruned too). The minimum is at the value
+below; we lock it now and do not look at the test period until the next
+section.
+
+```{r chosen-lambda}
+best <- grid[which.min(tr_mse)]
+best
+```
+
+## Honest out-of-sample results
+
+We now run the full series at the locked penalty and score only forecasts
+whose target row is past `train_end`. The natural benchmark for a single
+stock's return is the **zero-return forecast** (predict the mean, about zero);
+beating it in mean squared error is already a real, if modest, result. We also
+report direction accuracy against a 0.50 coin-flip reference, and compare an
+unpenalized fit that keeps all 30 features.
+
+```{r oos-fn}
+oos <- function(lambda) {
+  f <- roll_lasso(X, y, window, lambda, n_iter)
+  keep <- (window + seq_along(f$pred)) > train_end
+  pred <- f$pred[keep]
+  actual <- f$actual[keep]
+  list(mse = mean((pred - actual)^2),
+       dir_acc = mean(sign(pred) == sign(actual)),
+       mean_nz = mean(colSums(f$coef[, keep, drop = FALSE] != 0)),
+       sel = rowMeans(f$coef[, keep, drop = FALSE] != 0),
+       n_oos = length(actual))
+}
+zero <- mean(y[(train_end + 1L):nrow(X)]^2)
+o <- oos(best)
+o0 <- oos(0)
+mse_gain <- 100 * (zero - o$mse) / zero
+```
+
+```{r oos-table}
+data.frame(
+  model = c("zero return", "unpenalized (lambda = 0)",
+            sprintf("lasso (locked lambda = %s)", best)),
+  oos_mse = round(c(zero, o0$mse, o$mse), 3),
+  dir_acc = round(c(NA, o0$dir_acc, o$dir_acc), 3),
+  mean_nonzero = round(c(0, o0$mean_nz, o$mean_nz), 1)
+)
+cat("OOS observations:", o$n_oos, "\n")
+cat("MSE reduction vs zero:", sprintf("%.1f%%", mse_gain), "\n")
+```
+
+At the locked penalty the lasso reaches an out-of-sample MSE about 6.5% lower
+than the zero-return forecast, with direction accuracy around 0.58 versus the
+0.50 coin flip. The unpenalized fit retains all 30 features and does worse
+out-of-sample than the sparse lasso — the classic sign that regularization is
+pruning noise rather than signal here. These are thin edges, which is exactly
+what to expect at R-squared about 0.10.
+
+The plot below is a **retrospective diagnostic computed after locking**
+`lambda`; it is not used to choose anything. It shows the out-of-sample
+optimum is broad and sits slightly below the training-chosen value. At this
+signal-to-noise ratio the tuning is noisy — another reason to prefer a simple,
+moderately penalized model over fine-tuning.
+
+```{r oos-plot, fig.width = 6, fig.height = 4}
+oos_mse <- vapply(grid, function(l) oos(l)$mse, numeric(1))
+plot(grid, oos_mse, type = "b", pch = 19, col = "steelblue",
+     xlab = "lambda", ylab = "Out-of-sample MSE",
+     main = "Diagnostic only: OOS error vs penalty")
+abline(h = zero, lty = 2, col = "grey40")
+points(best, oos(best)$mse, pch = 17, col = "darkorange", cex = 1.5)
+text(best, oos(best)$mse, labels = "locked", pos = 4, cex = 0.8,
+     col = "darkorange")
+```
+
+## What the lasso actually selected
+
+Averaged over the out-of-sample windows, the three true drivers (features 1,
+2, 3) dominate, while most noise features appear only occasionally.
+
+```{r selection-freq}
+round(o$sel[1:6], 2)
+cat("mean selection freq, noise features 4-30:",
+    round(mean(o$sel[4:30]), 3), "\n")
+```
+
+```{r selection-plot, fig.width = 6, fig.height = 4}
+barplot(o$sel, names.arg = seq_along(o$sel),
+        col = ifelse(o$sel > 0.5, "darkorange", "grey70"),
+        xlab = "Feature", ylab = "Selection frequency",
+        main = "How often each feature survives (OOS windows)")
+abline(h = 0.5, lty = 2, col = "grey40")
+```
+
+Feature 3 has the weakest true signal and appears about half the time, and a
+couple of noise features flicker in. That is the realistic picture at low
+signal-to-noise: the lasso concentrates weight on the real drivers but does
+not give a perfectly clean indicator.
+
+## A complication: collinear signals
+
+Real candidate signals are correlated. Make feature 4 an exact copy of
+feature 1, then refit:
+
+```{r collinearity}
+X_col <- X
+X_col[, 4L] <- X[, 1L]
+fc <- roll_lasso(X_col, y, window, best, n_iter)
+keepc <- (window + seq_along(fc$pred)) > train_end
+c(driver_1 = round(mean(fc$coef[1L, keepc]), 3),
+  duplicate_4 = round(mean(fc$coef[4L, keepc]), 3))
+```
+
+The fitted weight splits almost evenly between the two identical columns.
+Neither is "more causal": the lasso cannot distinguish collinear candidates
+and simply shares the weight between them. So a non-zero coefficient is
+evidence of association, not of a causal driver — with correlated real-world
+signals, do not over-interpret which feature was selected.
+
+## Equivalence to the compiled function
+
+Finally, confirm that `cudaFin::rolling_predict()` agrees with the reference.
+On a small case the forecasts and coefficients match to about 1e-15 — pure
+floating-point round-off between the CPU and GPU linear-algebra backends. In
+production you would call `rolling_predict()` directly; it is the same
+computation, and the package test suite holds it to this contract on both
+backends.
+
+```{r equivalence}
+idx <- seq_len(90L)
+w_chk <- 60L
+ni_chk <- 30L
+Xs <- X[idx, , drop = FALSE]
+ys <- y[idx]
+chk <- rolling_predict(Xs, ys, window = w_chk, lambda = 0.3,
+                       n_iter = ni_chk)
+ref <- roll_lasso(Xs, ys, w_chk, 0.3, ni_chk)
+cat(sprintf("backend: %s\n", chk$backend))
+cat(sprintf("max |pred - ref| = %.3g\n",
+            max(abs(chk$pred - ref$pred))))
+cat(sprintf("max |coef - ref| = %.3g\n",
+            max(abs(chk$coefficients - ref$coef))))
+```
+
+## Caveats and takeaways
+
+- This is synthetic data. Real single-stock daily returns have even lower
+  signal-to-noise; a 6% MSE edge here is illustrative, not a trading result.
+- No transaction costs, turnover limits, or regime changes are modeled.
+- The solve is truncated (fixed ISTA steps), so coefficients are approximate.
+- Standardize on the training window only; we skipped fitting it here merely
+  because the simulated features already share a scale.
+- Collinear signals make the selected set non-unique; selection is not
+  causation.
+- Tune `lambda` on a time-ordered validation period and lock it before
+  touching the test period; random K-fold CV is inappropriate here.
+- Direction accuracy above 0.50 is the bar, and the margin here is thin.
+
+`cudaFin` keeps this whole example dependency-light: the only package used is
+`cudaFin` itself, plus base R.

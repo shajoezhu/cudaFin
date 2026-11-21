@@ -1,5 +1,17 @@
 # cudaFin 0.0.0.9008
 
+* The `rolling_resident()` ISTA inner loop now calls
+  `rcupp_d_prox_grad_step()` once per iteration (inv_scale = 1) instead of
+  composing eight level-1 resident operators. On the CUDA backend that part is
+  a single fused kernel launch, so a whole solver iteration costs ONE launch;
+  the CPU fallback keeps identical numerics. This is numerically identical to
+  `rolling_predict()` and the pure-R reference on both backends
+  (`max |dcoef| ~ 2e-15`), adds no `rcupp` operator and leaves
+  `rcupp_ctx_abi()` at 1. **Demo 3 FIN improves `3/6` -> `6/6`** configs with
+  `speedup > 1` at `n_iter = 400` (all three previously-losing small/medium
+  tiers flip positive), `max |dcoef| = 2.44e-15` (gate `1e-12`). See the
+  `rolling-residency` vignette.
+
 * Development version bumped from 0.0.0.9007.
 
 # cudaFin 0.0.0.9007

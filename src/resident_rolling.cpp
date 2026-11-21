@@ -29,9 +29,7 @@
  * host<->device traffic beyond O(window) index ints. strategy = "cold" instead
  * reassembles each window on the host and re-uploads it per fit -- the ROI
  * baseline that isolates the transfer saving, exactly as in cudaGlmnet's
- * cuda_resident_subsets(). Both strategies share the SAME resident ISTA loop
- * composed only from level-1 resident operators (gemv / copy / axpy / scal /
- * gemv_t / soft_threshold), so no per-operator H->D->H copies occur.
+ * cuda_resident_subsets(). Both strategies share the SAME ISTA loop.
  *
  * Numerical contract is IDENTICAL to src/fin.cpp and the pure-R reference in
  * tests/testthat/test-fin.R:
@@ -39,10 +37,12 @@
  *   thresh = lambda * window * step
  *   beta  <- prox(beta + step * Xw^T (yw - Xw beta))  for n_iter steps
  *   pred  = <X[t, ], beta>;  ynorm = ||yw||_2
- * We deliberately compose level-1 operators directly rather than calling the
- * level-2 rcupp_d_prox_grad_step() once per iteration: that shared part
- * allocates/frees scratch buffers inside each call, which is needless churn in
- * a long inner loop. This mirrors cudaGlmnet/src/enet_path.cpp.
+ * Each ISTA iteration is ONE call to the level-2 rcupp_d_prox_grad_step()
+ * (inv_scale = 1). On the CUDA backend that part launches a single fused
+ * kernel for the whole iteration, collapsing the ~8 per-iteration operator
+ * launches that dominated the demo-3 small/medium tiers; the CPU fallback
+ * composes the same level-1 operators with identical numerics. Beta is both
+ * the input iterate z and the output out -- the part supports that aliasing.
  */
 
 namespace {
@@ -94,14 +94,11 @@ Rcpp::List rolling_resident_cpp(Rcpp::NumericMatrix X, Rcpp::NumericVector y,
 
   // Resident working buffers (owned by ctx). Xw is the current window matrix
   // (window x p), yw its response, beta the ISTA iterate, row the forecast
-  // feature row; Xb/r are length-window scratch, gg/u length-p scratch.
+  // feature row. The inner ISTA scratch (Xb/r/g/u) lives INSIDE the fused
+  // rcupp_d_prox_grad_step part (shared memory on CUDA), not here.
   rcupp_buf Xw   = need_buf(c, window * p);
   rcupp_buf yw   = need_buf(c, window);
   rcupp_buf beta = need_buf(c, p);
-  rcupp_buf Xb   = need_buf(c, window);
-  rcupp_buf r    = need_buf(c, window);
-  rcupp_buf gg   = need_buf(c, p);
-  rcupp_buf u    = need_buf(c, p);
   rcupp_buf row  = need_buf(c, p);
 
   // Resident strategy: upload the FULL panel once, gather rows device-side.
@@ -159,18 +156,14 @@ Rcpp::List rolling_resident_cpp(Rcpp::NumericMatrix X, Rcpp::NumericVector y,
     const double thresh = lambda * static_cast<double>(window) * step;
     ynorm[slot] = rcupp_d_nrm2(c, window, yw);
 
-    // Downstream ISTA loop: every operator runs on resident buffers, with NO
-    // per-call host<->device copies. rcupp never sees the lasso / prox logic.
+    // ONE fused proximal-gradient (ISTA) step per iteration. beta is both z
+    // (in) and out; inv_scale = 1 reproduces plain soft-thresholding. This
+    // keeps the whole iteration in ONE kernel launch on CUDA (no per-operator
+    // launch overhead) while rcupp still never sees the lasso / prox loop.
     rcupp_buf_fill(c, beta, 0.0, p);
     for (int it = 0; it < n_iter; ++it) {
-      rcupp_d_gemv(c, Xw, window, p, beta, Xb);        // Xb = Xw beta
-      rcupp_d_copy(c, window, yw, r);                  // r = yw
-      rcupp_d_axpy(c, window, -1.0, Xb, r);            // r = yw - Xb
-      rcupp_d_scal(c, window, step, r);                // r *= step
-      rcupp_d_gemv_t(c, Xw, window, p, r, gg);         // gg = Xw^T r
-      rcupp_d_copy(c, p, beta, u);                     // u = beta
-      rcupp_d_axpy(c, p, 1.0, gg, u);                  // u += gg
-      rcupp_d_soft_threshold(c, u, thresh, beta, p);   // beta = prox(u)
+      rcupp_d_prox_grad_step(c, Xw, window, p, yw, beta,
+                             step, thresh, 1.0, beta);
       total_iters += 1.0;
     }
 

@@ -4,6 +4,8 @@ FISTA
 GetCCallable
 ISTA
 LinkingTo
+inv
+matvecs
 Lipschitz
 Rcpp
 ROI

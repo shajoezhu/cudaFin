@@ -27,9 +27,10 @@ signal workloads without any CUDA build complexity.
 - `rolling_resident(x, y, window = 50, lambda = 0.01, n_iter = 100,
   strategy = "resident")` — the **P3-fin resident** counterpart built on the
   `rcupp` Phase-0 device-context C ABI. ONE full `X`/`y` panel is uploaded
-  once and each window is obtained by a device-side `gather_rows`, with the
-  ISTA loop composed from resident operators (no per-call host-device copies).
-  `strategy = "cold"` re-uploads each window from the host as an ROI baseline.
+  once and each window is obtained by a device-side `gather_rows`; the ISTA
+  inner step calls `rcupp_d_prox_grad_step()` (one fused CUDA kernel per
+  iteration, no per-call host-device copies). `strategy = "cold"` re-uploads
+  each window from the host as an ROI baseline.
   Numerically identical to `rolling_predict()` on both backends; adds a
   `strategy` field. See the `rolling-residency` vignette for the demo 3
   measurement.
@@ -105,12 +106,15 @@ run it for you.
 > call copies `Xw` host-to-device), so a workload where every window changes
 > `X` is transfer-bound -- the "demo 3 FIN 0/6" gap. `rolling_resident()`
 > resolves this with the Phase-0 device-context ABI: one resident full panel,
-> device-side row gather per window, and an ISTA loop composed from resident
-> operators with no per-call copies. `strategy = "cold"` re-uploads each window
-> as an ROI baseline. No new `rcupp` operator is needed and `rcupp_ctx_abi()`
-> stays 1; the solver loop lives downstream in this package. See the
-> `rolling-residency` vignette for the measured resident-vs-cold-vs-pure-R
-> result.
+> device-side row gather per window, and an ISTA loop whose inner step calls
+> `rcupp_d_prox_grad_step()` -- ONE fused CUDA kernel per iteration (the CPU
+> fallback composes the same level-1 operators with identical numerics).
+> `strategy = "cold"` re-uploads each window as an ROI baseline. No new `rcupp`
+> operator is added and `rcupp_ctx_abi()` stays 1; the solver loop lives
+> downstream in this package. On an equal-work `n_iter = 400` CUDA run this
+> takes demo 3 FIN from `0/6` to **`6/6`** configs with `speedup > 1`
+> (`max |dcoef| = 2.44e-15`). See the `rolling-residency` vignette for the
+> measured resident-vs-cold-vs-pure-R result.
 
 See the `getting-started` vignette and
 [rcupp's public API](https://github.com/shajoezhu/rcupp) for the full operator

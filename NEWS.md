@@ -1,3 +1,7 @@
+# cudaFin 0.0.0.9008
+
+* Development version bumped from 0.0.0.9007.
+
 # cudaFin 0.0.0.9007
 
 * Add `rolling_resident()`: a P3-fin resident rolling-window lasso path built

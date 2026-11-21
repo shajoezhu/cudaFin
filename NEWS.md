@@ -1,3 +1,7 @@
+# cudaFin 0.0.0.9009
+
+* Development version bumped from 0.0.0.9008.
+
 # cudaFin 0.0.0.9008
 
 * The `rolling_resident()` ISTA inner loop now calls

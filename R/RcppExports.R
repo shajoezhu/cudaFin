@@ -5,3 +5,7 @@ rolling_predict_cpp <- function(X, y, window, lambda, n_iter) {
     .Call(`_cudaFin_rolling_predict_cpp`, X, y, window, lambda, n_iter)
 }
 
+rolling_resident_cpp <- function(X, y, window, lambda, n_iter, strategy) {
+    .Call(`_cudaFin_rolling_resident_cpp`, X, y, window, lambda, n_iter, strategy)
+}
+

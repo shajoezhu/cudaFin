@@ -25,9 +25,26 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// rolling_resident_cpp
+Rcpp::List rolling_resident_cpp(Rcpp::NumericMatrix X, Rcpp::NumericVector y, int window, double lambda, int n_iter, std::string strategy);
+RcppExport SEXP _cudaFin_rolling_resident_cpp(SEXP XSEXP, SEXP ySEXP, SEXP windowSEXP, SEXP lambdaSEXP, SEXP n_iterSEXP, SEXP strategySEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type X(XSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type y(ySEXP);
+    Rcpp::traits::input_parameter< int >::type window(windowSEXP);
+    Rcpp::traits::input_parameter< double >::type lambda(lambdaSEXP);
+    Rcpp::traits::input_parameter< int >::type n_iter(n_iterSEXP);
+    Rcpp::traits::input_parameter< std::string >::type strategy(strategySEXP);
+    rcpp_result_gen = Rcpp::wrap(rolling_resident_cpp(X, y, window, lambda, n_iter, strategy));
+    return rcpp_result_gen;
+END_RCPP
+}
 
 static const R_CallMethodDef CallEntries[] = {
     {"_cudaFin_rolling_predict_cpp", (DL_FUNC) &_cudaFin_rolling_predict_cpp, 5},
+    {"_cudaFin_rolling_resident_cpp", (DL_FUNC) &_cudaFin_rolling_resident_cpp, 6},
     {NULL, NULL, 0}
 };
 

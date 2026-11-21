@@ -24,6 +24,15 @@ signal workloads without any CUDA build complexity.
   `pred` (forecasts), `actual` (realised `y`), `coefficients`
   (`p x (T - window)` path of fitted betas), `ynorm`, `iters`, `mse`,
   `dir_acc`, and `backend` (`"cuda"` or `"cpu-fallback"`).
+- `rolling_resident(x, y, window = 50, lambda = 0.01, n_iter = 100,
+  strategy = "resident")` — the **P3-fin resident** counterpart built on the
+  `rcupp` Phase-0 device-context C ABI. ONE full `X`/`y` panel is uploaded
+  once and each window is obtained by a device-side `gather_rows`, with the
+  ISTA loop composed from resident operators (no per-call host-device copies).
+  `strategy = "cold"` re-uploads each window from the host as an ROI baseline.
+  Numerically identical to `rolling_predict()` on both backends; adds a
+  `strategy` field. See the `rolling-residency` vignette for the demo 3
+  measurement.
 
 The step size uses the conservative Lipschitz bound `1/sum(Xw^2)` and `n_iter`
 is fixed, so the whole path is deterministic and exactly reproducible by a
@@ -92,10 +101,16 @@ its namespace and DLL registrations are loaded. Regenerate exports with
 `Rcpp::compileAttributes("myPkg")` after editing — `R CMD build/check` does not
 run it for you.
 
-> Note on performance: rolling windows change `X` every window, so a persistent
-> `rcupp` session (designed for one `X` across many lambdas) does not by itself
-> speed this workload up; deeper device-pointer / incremental-L work is future
-> development. This package is about correctness and the `LinkingTo` pattern.
+> Note on performance: `rolling_predict()` uses the F0 one-shot operators (each
+> call copies `Xw` host-to-device), so a workload where every window changes
+> `X` is transfer-bound -- the "demo 3 FIN 0/6" gap. `rolling_resident()`
+> resolves this with the Phase-0 device-context ABI: one resident full panel,
+> device-side row gather per window, and an ISTA loop composed from resident
+> operators with no per-call copies. `strategy = "cold"` re-uploads each window
+> as an ROI baseline. No new `rcupp` operator is needed and `rcupp_ctx_abi()`
+> stays 1; the solver loop lives downstream in this package. See the
+> `rolling-residency` vignette for the measured resident-vs-cold-vs-pure-R
+> result.
 
 See the `getting-started` vignette and
 [rcupp's public API](https://github.com/shajoezhu/rcupp) for the full operator

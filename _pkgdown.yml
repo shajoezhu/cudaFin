@@ -7,6 +7,7 @@ reference:
 - title: Rolling-window forecasting
   contents:
   - rolling_predict
+  - rolling_resident
 
 articles:
 - title: Get started
@@ -15,3 +16,4 @@ articles:
 - title: Applications
   contents:
   - stock-lasso-example
+  - rolling-residency

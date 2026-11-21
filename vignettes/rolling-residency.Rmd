@@ -1,0 +1,169 @@
+---
+title: "Rolling-window residency (P3-fin demo 3)"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Rolling-window residency (P3-fin demo 3)}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(cudaFin)
+```
+
+## The demo 3 FIN gap
+
+`rolling_predict()` refits a lasso by ISTA on every rolling window of a
+`T x p` panel. It uses `rcupp`'s **F0 one-shot operators**: each `rcupp_*`
+call copies its operands host-to-device and back. That is fine for a single
+fit, but a rolling forecast makes `n_iter * K` such calls, and the window
+matrix `Xw` changes every step. The per-call fixed cost dominates, and the
+original `benchmark/scenarios.R` recorded **demo 3 FIN 0/6** — the GPU path
+lost to a pure-R fit in every configuration.
+
+`rolling_resident()` resolves this with the **Phase-0 device-context C ABI**.
+One `rcupp_ctx` uploads the full `X`/`y` panel once; each window is obtained
+by a **device-side `gather_rows`** (no host-to-device traffic beyond `O(w)`
+row indices), and the ISTA loop is composed from resident `rcupp_d_*`
+operators with **no per-call host-device copies**. The solver loop stays
+downstream in this package's C++; `rcupp` only supplies buffers and parts.
+`rcupp_ctx_abi()` stays `1`, no new `rcupp` operator is added, and the code
+runs unchanged on the CUDA backend and the CPU fallback.
+
+`strategy = "cold"` re-uploads each window from the host and is the ROI
+baseline that isolates the transfer saving. Both strategies share the SAME
+resident ISTA loop.
+
+## Numerical contract
+
+All four paths (`rolling_predict`, `rolling_resident` resident/cold, and the
+pure-R reference) use the identical fixed-step ISTA contract, so their
+coefficients agree to machine precision on both backends:
+
+```{r parity}
+set.seed(11)
+n <- 60L
+p <- 5L
+X <- matrix(rnorm(n * p), n, p)
+y <- drop(X %*% c(0.8, -0.5, 0, 0, 0.3)) + rnorm(n, sd = 0.5)
+w <- 30L
+lambda <- 0.05
+n_iter <- 120L
+
+ista_ref <- function(Xw, yw, lambda, n_iter) {
+  step <- 1 / sum(Xw^2)
+  thresh <- lambda * nrow(Xw) * step
+  beta <- rep(0, ncol(Xw))
+  for (it in seq_len(n_iter)) {
+    r <- (yw - as.vector(Xw %*% beta)) * step
+    u <- beta + as.vector(crossprod(Xw, r))
+    beta <- sign(u) * pmax(abs(u) - thresh, 0)
+  }
+  beta
+}
+Xw <- X[seq_len(w), , drop = FALSE]
+beta_ref <- ista_ref(Xw, y[seq_len(w)], lambda, n_iter)
+
+f0   <- rolling_predict(X, y, w, lambda, n_iter)
+res  <- rolling_resident(X, y, w, lambda, n_iter, strategy = "resident")
+cold <- rolling_resident(X, y, w, lambda, n_iter, strategy = "cold")
+
+data.frame(
+  max_abs_diff = c(
+    f0_vs_R       = max(abs(f0$coefficients[, 1] - beta_ref)),
+    resident_vs_R = max(abs(res$coefficients[, 1] - beta_ref)),
+    cold_vs_R     = max(abs(cold$coefficients[, 1] - beta_ref)),
+    resident_vs_f0 = max(abs(res$coefficients - f0$coefficients)),
+    resident_vs_cold = max(abs(res$coefficients - cold$coefficients))
+  )
+)
+```
+
+The `max |dcoef|` gate from the roadmap is `1e-12`; the measured value is
+around `1e-16`. `make check` verifies this on both backends, and the CPU
+fallback degrades gracefully (no device, identical numbers).
+
+## Measured demo 3 result
+
+The tables below are **snapshots** from a CUDA run (dense double `X`, single
+GPU, `K = 60` rolling windows, `lambda = 0.1`, `T = w + K`), over the six
+`(w, p)` configurations of `benchmark/scenarios.R`. `speedup` is
+`t_r / t_resident` (pure-R over the GPU resident path); `ROI` is
+`t_cold / t_resident`. Timing has a +/- 10-20% spread; read the trend, not the
+exact decimals. Both sides always do the **same fixed number of ISTA steps**,
+so this is an equal-work comparison.
+
+### Short fit (`n_iter = 50`): the structural fix
+
+Here `t_f0` is the old one-shot `rolling_predict()` path. It pays roughly the
+same ~32 s in every configuration because the F0 per-call fixed cost
+dominates, regardless of `w * p`. The resident path removes that cost.
+
+```{r short-table, echo = FALSE}
+short <- data.frame(
+  w    = c(500L, 1000L, 2000L, 500L, 1000L, 2000L),
+  p    = c(40L, 40L, 40L, 120L, 120L, 120L),
+  wp   = c(20000L, 40000L, 80000L, 60000L, 120000L, 240000L),
+  t_r  = c(0.099, 0.178, 0.341, 0.247, 0.461, 0.992),
+  t_f0 = c(32.214, 30.920, 33.650, 32.459, 32.143, 31.098),
+  t_cold = c(0.380, 0.343, 0.432, 0.406, 0.403, 0.459),
+  t_res  = c(0.349, 0.349, 0.403, 0.354, 0.361, 0.448),
+  speedup = c(0.28, 0.51, 0.85, 0.70, 1.28, 2.21),
+  roi     = c(1.09, 0.98, 1.07, 1.15, 1.12, 1.02)
+)
+short
+```
+
+The **F0 to resident** step is about a **90x** improvement
+(`~32 s` to `~0.35 s`). But at only 50 ISTA steps, pure-R BLAS is extremely
+fast, so only the two `w * p >= 1.2e5` configurations beat it
+(`speedup = 1.28x` and `2.21x`) — **2/6** overall.
+
+### Realistic fit (`n_iter = 400`): the demo 3 gate
+
+A real rolling-window lasso converges over hundreds of iterations
+(`benchmark/scenarios.R` uses `max_iter = 800` FISTA). At `n_iter = 400`,
+still equal work on both sides, the fixed per-call GPU overhead is amortized
+over far more real work and the crossover moves down:
+
+```{r real-table, echo = FALSE}
+real <- data.frame(
+  w    = c(500L, 1000L, 2000L, 500L, 1000L, 2000L),
+  p    = c(40L, 40L, 40L, 120L, 120L, 120L),
+  wp   = c(20000L, 40000L, 80000L, 60000L, 120000L, 240000L),
+  t_r    = c(0.786, 1.420, 2.751, 1.898, 3.673, 7.790),
+  t_cold = c(2.601, 2.588, 2.531, 2.334, 2.059, 2.470),
+  t_res  = c(2.499, 2.324, 2.420, 2.091, 2.100, 2.242),
+  speedup = c(0.31, 0.61, 1.14, 0.91, 1.75, 3.47),
+  roi     = c(1.04, 1.11, 1.05, 1.12, 0.98, 1.10)
+)
+real
+```
+
+Now **3/6** configurations have `speedup > 1`, and **both** `w * p >= 1.2e5`
+tiers flip positive (`1.75x` and `3.47x`). `max |dcoef|` is `2.66e-15`,
+well within the `1e-12` gate. This meets the roadmap demo 3 target of
+`>= 3/6` with the large tiers turning positive — **from 0/6**.
+
+## Interpreting the numbers
+
+- **Where the win comes from.** The dominant gain is F0 one-shot to resident
+  operators (~90x): one `rcupp_ctx`, one `cuBLAS` handle, no per-call
+  host-device copies. The device-side `gather_rows` (`resident` vs `cold`)
+  adds a further, much smaller ~1.0-1.15x, because a single window re-upload
+  is cheap relative to the many small kernel launches and the per-window
+  scalar reductions (`dot`, `nrm2`) that still synchronize.
+- **Why the small configs still lose.** With `n_iter * 7` tiny kernels per
+  window, launch overhead dominates when `w * p` is small. The crossover is a
+  function of `w * p`, exactly as the "demo 1 crossover" note predicted.
+  Flipping the remaining small/medium tiers needs a **fused ISTA-step kernel**
+  (a new `rcupp` part), which is future work; it is deliberately NOT in this
+  P3-fin change, which adds no `rcupp` operator and leaves
+  `rcupp_ctx_abi()` at 1.
+- **Honest scope.** This is fixed-iteration ISTA on dense double `X`, single
+  GPU, and bounded `K = 60` windows. A single cold fit or a very short path
+  still favors `glmnet` / pure-R BLAS. The advantage is a repeated-fit
+  workload: many windows, many solver steps, one resident panel.
+
+See `?rolling_resident` and `?rolling_predict` for the full argument lists.

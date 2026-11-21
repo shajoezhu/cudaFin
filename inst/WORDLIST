@@ -1,10 +1,12 @@
 ABI
 CUDA
+FISTA
 GetCCallable
 ISTA
 LinkingTo
 Lipschitz
 Rcpp
+ROI
 collinear
 cudaBio
 cudaGlmnet
@@ -14,3 +16,4 @@ prox
 rcupp
 rcupp's
 realised
+roadmap
